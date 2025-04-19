@@ -1,0 +1,54 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client" // Explicitly set default output (Troubleshooting Step)
+}
+
+datasource db {
+  provider = "mysql" // Make sure this matches your DB (e.g., "postgresql" or "mysql")
+  url      = env("DATABASE_URL")
+ relationMode = "prisma"
+}
+
+
+// --- User Model ---
+model User {
+  id            String    @id @default(uuid()) // Using UUID for IDs
+  email         String    @unique
+  passwordHash  String // Renamed from password_hash for convention
+  googleId      String?   @unique // Optional googleId
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  boards        Board[]   // Relation: A user can have multiple boards
+}
+
+// --- Board Model ---
+model Board {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  userId    String   // Foreign key field
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade) // Relation: Board belongs to a User
+  tasks     Task[]   // Relation: A board can have multiple tasks
+}
+
+// --- Task Model ---
+model Task {
+  id                  String    @id @default(uuid())
+  title               String
+  description         String? // Optional description
+  status              String    // Consider using an Enum later if needed
+  startDate           DateTime? // Optional dates
+  estimatedFinishDate DateTime?
+  reminderDateTime    DateTime?
+  progress            Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  boardId             String    // Foreign key field
+  board               Board     @relation(fields: [boardId], references: [id], onDelete: Cascade) // Relation: Task belongs to a Board
+}
+
+
