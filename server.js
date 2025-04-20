@@ -6,9 +6,9 @@ const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-const passport = require('passport'); // Added
-const GoogleStrategy = require('passport-google-oauth20').Strategy; // Added
-const session = require('express-session'); // Added
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const session = require('express-session');
 require('dotenv').config();
 
 // --- Create instances ---
@@ -23,28 +23,29 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL;
+const BACKEND_URL = process.env.BACKEND_URL; // Added for absolute callback URL
 
 // Check for essential environment variables
-if (!JWT_SECRET || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !SESSION_SECRET || !FRONTEND_URL) {
-    console.error("FATAL ERROR: Missing required environment variables (JWT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, FRONTEND_URL). Check .env file.");
+if (!JWT_SECRET || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !SESSION_SECRET || !FRONTEND_URL || !BACKEND_URL) {
+    console.error("FATAL ERROR: Missing required environment variables (JWT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, FRONTEND_URL, BACKEND_URL). Check .env file and hosting platform environment settings.");
     process.exit(1);
 }
 
 // --- Global Middleware ---
-app.use(cors()); // Enable CORS for all origins
-app.use(express.json()); // Parse JSON request bodies
+app.use(cors()); // Consider restricting origin in production: app.use(cors({ origin: FRONTEND_URL }));
+app.use(express.json());
 
 // Session Configuration (BEFORE Passport initialization)
 app.use(session({
     secret: SESSION_SECRET,
     resave: false,
-    saveUninitialized: false, // Don't create session until something stored
-    // cookie: { secure: process.env.NODE_ENV === 'production' } // Enable for HTTPS in production
+    saveUninitialized: false,
+    // cookie: { secure: process.env.NODE_ENV === 'production' } // Enable for HTTPS
 }));
 
 // Passport Middleware Initialization (AFTER session)
 app.use(passport.initialize());
-app.use(passport.session()); // Initialize Passport session support
+app.use(passport.session());
 
 // --- Passport Configuration ---
 
@@ -52,42 +53,24 @@ app.use(passport.session()); // Initialize Passport session support
 passport.use(new GoogleStrategy({
     clientID: GOOGLE_CLIENT_ID,
     clientSecret: GOOGLE_CLIENT_SECRET,
-    callbackURL: "/api/auth/google/callback", // Relative path okay if base URL consistent
+    // Use the full, absolute HTTPS URL for the callback
+    callbackURL: `${BACKEND_URL}/api/auth/google/callback`, // Use environment variable
     scope: ['profile', 'email']
   },
   async (accessToken, refreshToken, profile, done) => {
     console.log('Google Callback Profile Received:', { id: profile.id, email: profile.emails?.[0]?.value });
-
     try {
-      let user = await prisma.user.findUnique({
-        where: { googleId: profile.id },
-      });
-
+      let user = await prisma.user.findUnique({ where: { googleId: profile.id } });
       if (!user) {
         const email = profile.emails?.[0]?.value;
-        if (!email) {
-            return done(new Error("No email found in Google profile."), null);
-        }
+        if (!email) return done(new Error("No email found in Google profile."), null);
         user = await prisma.user.findUnique({ where: { email: email } });
-
         if (user) {
-          // User exists with email, link Google ID
-          user = await prisma.user.update({
-            where: { email: email },
-            data: { googleId: profile.id }
-          });
+          user = await prisma.user.update({ where: { email: email }, data: { googleId: profile.id } });
           console.log(`Linked Google ID ${profile.id} to existing user ${user.email}`);
         } else {
-          // User not found by email either, create new user
           console.log(`Creating new user for Google ID ${profile.id}, email ${email}`);
-          // Define the data object for creation
-          const createData = {
-            googleId: profile.id,
-            email: email,
-            passwordHash: '', // <-- WORKAROUND: Use empty string instead of null
-            // name: profile.displayName // Example if adding name
-          };
-          // Log the data just before the create call
+          const createData = { googleId: profile.id, email: email, passwordHash: '' }; // Use empty string workaround
           console.log("Attempting prisma.user.create with data:", createData);
           user = await prisma.user.create({ data: createData });
           console.log(`Created new user via Google: ${user.email}`);
@@ -95,8 +78,7 @@ passport.use(new GoogleStrategy({
       } else {
          console.log(`Found existing user via Google ID: ${user.email}`);
       }
-      return done(null, user); // Pass user object to the next step
-
+      return done(null, user);
     } catch (error) {
       console.error("Error in Google OAuth Strategy Verify Callback:", error);
       return done(error, null);
@@ -107,16 +89,15 @@ passport.use(new GoogleStrategy({
 // Serialize user ID into the session
 passport.serializeUser((user, done) => {
     console.log("Serializing user:", user.id);
-    done(null, user.id); // Store only user ID
+    done(null, user.id);
 });
 
 // Deserialize user from the session ID
 passport.deserializeUser(async (id, done) => {
     console.log("Deserializing user ID:", id);
     try {
-        // Ensure 'id' is treated as string if your IDs are strings (like UUIDs)
         const user = await prisma.user.findUnique({ where: { id: String(id) } });
-        done(null, user); // Attach full user object to req.user for session-based requests (if any)
+        done(null, user);
     } catch(error) {
         console.error("Deserialize Error:", error);
         done(error, null);
@@ -129,13 +110,12 @@ const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     if (token == null) return res.sendStatus(401);
-
     jwt.verify(token, JWT_SECRET, (err, userPayload) => {
         if (err) {
             console.error("JWT Verification Error:", err.message);
             return res.sendStatus(403);
         }
-        req.user = userPayload; // Assign the decoded payload directly
+        req.user = userPayload;
         next();
     });
 };
@@ -150,49 +130,22 @@ app.get('/api/test', (req, res) => {
 
 // --- Email/Password Authentication Routes ---
 app.post('/api/auth/signup', async (req, res) => {
+    // ... (includes password validation) ...
     const { email, password } = req.body;
-
-    // --- Basic Input Validation ---
-    if (!email || !password) {
-        return res.status(400).json({ message: 'Email and password are required.' });
-    }
-
-    // --- Password Strength Validation ---
-    if (password.length < 8) {
-        return res.status(400).json({ message: 'Password must be at least 8 characters long.' });
-    }
-    if (!/[A-Z]/.test(password)) {
-        return res.status(400).json({ message: 'Password must contain at least one uppercase letter.' });
-    }
-    if (!/[a-z]/.test(password)) {
-        return res.status(400).json({ message: 'Password must contain at least one lowercase letter.' });
-    }
-    if (!/[0-9]/.test(password)) {
-        return res.status(400).json({ message: 'Password must contain at least one number.' });
-    }
-    // Optional: Add special character check if desired
-    // if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]+/.test(password)) {
-    //     return res.status(400).json({ message: 'Password must contain at least one special character.' });
-    // }
-    // --- End Validation ---
-
+    if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
+    // Password Strength Validation
+    if (password.length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters long.' });
+    if (!/[A-Z]/.test(password)) return res.status(400).json({ message: 'Password must contain at least one uppercase letter.' });
+    if (!/[a-z]/.test(password)) return res.status(400).json({ message: 'Password must contain at least one lowercase letter.' });
+    if (!/[0-9]/.test(password)) return res.status(400).json({ message: 'Password must contain at least one number.' });
+    // End Validation
     try {
-        // Check if user already exists
         const existingUser = await prisma.user.findUnique({ where: { email } });
-        if (existingUser) {
-            return res.status(400).json({ message: 'Email already in use.' });
-        }
-
-        // Hash the password (only if validation passes)
+        if (existingUser) return res.status(400).json({ message: 'Email already in use.' });
         const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-        // Create the new user
         const user = await prisma.user.create({ data: { email, passwordHash } });
-
-        // Send success response (excluding password hash)
         const userResponse = { id: user.id, email: user.email, createdAt: user.createdAt };
         res.status(201).json({ message: 'User created successfully', user: userResponse });
-
     } catch (error) {
         console.error("Signup Error:", error);
         res.status(500).json({ message: 'Error creating user.' });
@@ -200,15 +153,12 @@ app.post('/api/auth/signup', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-     // ... (same as before) ...
+     // ... (includes check for empty passwordHash) ...
      const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
     try {
         const user = await prisma.user.findUnique({ where: { email } });
-        // Adjust login check for Google users (who have empty string passwordHash)
-        if (!user || !user.passwordHash) { // Check if passwordHash exists and is not empty
-             return res.status(401).json({ message: 'Invalid credentials. Please use Google Sign-In if you registered with Google.' });
-        }
+        if (!user || !user.passwordHash) return res.status(401).json({ message: 'Invalid credentials. Please use Google Sign-In if you registered with Google.' });
         const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
         if (!isPasswordValid) return res.status(401).json({ message: 'Invalid credentials.' });
         const tokenPayload = { userId: user.id, email: user.email };
@@ -229,25 +179,22 @@ app.get('/api/auth/google',
 // Step 2: Google redirects back here
 app.get('/api/auth/google/callback',
   passport.authenticate('google', {
-      failureRedirect: `${FRONTEND_URL}/?error=google-auth-failed`, // Redirect to frontend auth page on failure
-      session: false // We are not using Passport sessions for login state, use JWT
+      // Use FRONTEND_URL for failure redirect (auth page)
+      failureRedirect: `${FRONTEND_URL}/?error=google-auth-failed`,
+      session: false // Don't rely on session after this point
   }),
   (req, res) => {
     // Successful Google authentication
-    const user = req.user; // User object from Passport verify callback
-
+    const user = req.user;
     if (!user) {
          console.error("Google callback success but req.user is missing.");
-         return res.redirect(`${FRONTEND_URL}/?error=google-auth-error`); // Redirect to frontend auth page
+         return res.redirect(`${FRONTEND_URL}/?error=google-auth-error`);
     }
-
     console.log("Google callback successful, issuing JWT for user:", user.email);
-
-    // Generate JWT for this user
+    // Generate JWT
     const tokenPayload = { userId: user.id, email: user.email };
     const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '1d' });
-
-    // Redirect back to the frontend callback handler with the token
+    // Redirect back to frontend callback handler
     res.redirect(`${FRONTEND_URL}/auth/callback?token=${token}`);
   }
 );
@@ -286,7 +233,7 @@ app.put('/api/boards/:boardId', authenticateToken, async (req, res) => {
     try {
         const board = await prisma.board.findUnique({ where: { id: boardId } });
         if (!board || board.userId !== userId) return res.status(404).json({ message: "Board not found or user not authorized." });
-        const updatedBoard = await prisma.board.update({ where: { id: boardId }, data: { name } });
+        await prisma.board.update({ where: { id: boardId }, data: { name } });
         res.json({ message: "Board updated successfully." });
     } catch (error) { console.error("Update Board Error:", error); res.status(500).json({ message: "Error updating board." }); }
 });
